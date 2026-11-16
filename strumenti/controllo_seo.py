@@ -39,11 +39,41 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+DOMINIO = ""  # dominio del sito controllato (impostato in main)
+
+
+def url_permesso(url: str) -> bool:
+    """Solo http/https, solo il dominio controllato (e il suo www), mai indirizzi locali o privati.
+    Le sitemap e il robots.txt vengono da siti esterni: non devono far leggere file locali (file://)
+    o servizi interni (SSRF)."""
+    import ipaddress
+    import socket
+    p = urllib.parse.urlparse(url)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        return False
+    host = p.hostname.lower()
+    base = DOMINIO[4:] if DOMINIO.startswith("www.") else DOMINIO
+    if DOMINIO and host not in (base, "www." + base):
+        return False
+    try:
+        for info in socket.getaddrinfo(host, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return False
+    except (socket.gaierror, ValueError):
+        return False
+    return True
+
+
 def get(url: str, seguire=True, limite=60 * 1024 * 1024):
+    if not url_permesso(url):
+        return 0, {}, b"URL non permesso (schema, dominio o indirizzo privato)"
     opener = urllib.request.build_opener() if seguire else urllib.request.build_opener(NoRedirect)
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
         r = opener.open(req, timeout=30)
+        if not url_permesso(r.geturl()):
+            return 0, {}, b"redirect verso un URL non permesso"
         return r.status, dict(r.headers), r.read(limite)
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers or {}), b""
@@ -224,6 +254,10 @@ def main() -> int:
     ap.add_argument("--pagine", type=int, default=20)
     a = ap.parse_args()
     base = a.sito.rstrip("/")
+    global DOMINIO
+    DOMINIO = (urllib.parse.urlparse(base).hostname or "").lower()
+    if urllib.parse.urlparse(base).scheme not in ("http", "https"):
+        sys.exit("indica un sito http:// o https://")
     r = Rapporto()
     controlla_redirect(base, r)
     sitemaps = controlla_robots(base, r) or [base + "/sitemap.xml"]
